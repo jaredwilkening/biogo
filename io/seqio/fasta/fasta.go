@@ -17,6 +17,7 @@ package fasta
 // along with this program.  If not, see <http://www.gnu.org/licenses/>.
 
 import (
+	"fmt"
 	"bufio"
 	"bytes"
 	"github.com/kortschak/BioGo/bio"
@@ -24,6 +25,11 @@ import (
 	"github.com/kortschak/BioGo/util"
 	"io"
 	"os"
+)
+
+var (
+	IDPrefix = []byte(">") // default delimiters
+	SeqPrefix = []byte("") // default delimiters
 )
 
 // Fasta sequence format reader type.
@@ -40,8 +46,8 @@ func NewReader(f io.ReadCloser) *Reader {
 	return &Reader{
 		f:         f,
 		r:         bufio.NewReader(f),
-		IDPrefix:  []byte(">"), // default delimiters
-		SeqPrefix: []byte(""),  // default delimiters
+		IDPrefix:  IDPrefix, 
+		SeqPrefix: SeqPrefix,
 		last:      nil,
 	}
 }
@@ -57,46 +63,30 @@ func NewReaderName(name string) (r *Reader, err error) {
 
 // Read a single sequence and return it or an error.
 func (self *Reader) Read() (sequence *seq.Seq, err error) {
-	var line, label, body []byte
-	label = self.last
-
-READ:
+	var label, body []byte
 	for {
-		if line, err = self.r.ReadBytes('\n'); err == nil {
-			if len(line) > 0 && line[len(line)-1] == '\r' {
-				line = line[:len(line)-1]
+		read, err := self.r.ReadBytes('>')
+		if len(read) > 1 {
+			// sanitize newlines
+			read = bytes.Replace(read, []byte("\r\n"), []byte("\n"), -1)
+			read = bytes.Replace(read, []byte("\n\r"), []byte("\n"), -1)
+			read = bytes.Replace(read, []byte("\r"), []byte("\n"), -1)
+					
+			lines := bytes.Split(read, []byte("\n"))
+			if len(lines) > 1 {
+				label = lines[0]
+				body = bytes.Join(lines[1:len(lines)-1], []byte(""))
 			}
-			line = bytes.TrimSpace(line)
-			if len(line) == 0 {
-				continue
-			}
-			switch {
-			case bytes.HasPrefix(line, self.IDPrefix):
-				if self.last == nil {
-					label = line[len(self.IDPrefix):]
-					self.last = label
-				} else {
-					label = self.last
-					self.last = line[len(self.IDPrefix):] // entering a new sequence so exit read loop
-					break READ
-				}
-			case bytes.HasPrefix(line, self.SeqPrefix):
-				line = bytes.Join(bytes.Fields(line[len(self.SeqPrefix):]), nil)
-				body = append(body, line...)
-			}
-		} else {
-			if self.last != nil {
-				self.last = nil
-				err = nil
-				break
-			} else {
-				return nil, io.EOF
-			}
+			break 
+		} else if err != nil {
+			return nil, io.EOF
 		}
 	}
-
-	sequence = seq.New(string(label), body, nil)
-
+	if len(label) > 0 && len(body) > 0 {
+		sequence = seq.New(string(label), body, nil)
+	} else {
+		return nil, bio.NewError("Invalid fasta entry", 0, nil)
+	}
 	return
 }
 
@@ -105,6 +95,7 @@ func (self *Reader) Rewind() (err error) {
 	if s, ok := self.f.(io.Seeker); ok {
 		self.last = nil
 		_, err = s.Seek(0, 0)
+		self.r = bufio.NewReader(self.f)
 	} else {
 		err = bio.NewError("Not a Seeker", 0, self)
 	}
@@ -148,19 +139,22 @@ func NewWriterName(name string, width int) (w *Writer, err error) {
 
 // Write a single sequence and return the number of bytes written and any error.
 func (self *Writer) Write(s *seq.Seq) (n int, err error) {
-	var ln int
-	if n, err = self.w.WriteString(self.IDPrefix + s.ID + "\n"); err == nil {
-		for i := 0; i*self.Width <= s.Len(); i++ {
-			endLinePos := util.Min(self.Width*(i+1), s.Len())
-			ln, err = self.w.WriteString(self.SeqPrefix + string(s.Seq[self.Width*i:endLinePos]) + "\n")
-			n += ln
-			if err != nil {
-				break
-			}
-		}
-	}
-
+	n, err = self.w.Write([]byte(Format(s, self.Width)))
 	return
+}
+
+// Format a single sequence into fasta string
+func Format(s *seq.Seq, width int) (sequence string) {
+	sequence = fmt.Sprintf("%s%s\n", IDPrefix, s.ID)
+	if width > 0 {
+		for i := 0; i*width <= s.Len(); i++ {
+			endLinePos := util.Min(width*(i+1), s.Len())
+			sequence = fmt.Sprintf("%s%s%s\n", sequence, SeqPrefix, string(s.Seq[width*i:endLinePos]))
+		}
+	} else {
+		sequence = fmt.Sprintf("%s%s%s\n", sequence, SeqPrefix, s.Seq)
+	}
+	return 
 }
 
 // Flush the writer.
